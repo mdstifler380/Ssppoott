@@ -7,6 +7,7 @@ permissions:
 jobs:
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -29,14 +30,31 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install Android SDK components
-        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      # GitHub's Ubuntu runner already ships the Android SDK, so we use it as is.
+      # (The android-actions/setup-android action tried to swap in newer command-line tools and failed.)
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set +o pipefail                     # "yes" is cut off by sdkmanager on purpose; that must not fail the step
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          echo "SDK: $SDK"; "$SDKM" --version || true
+          echo "Installed platforms:"; ls "$SDK/platforms" 2>/dev/null || true
+          echo "Installed build-tools:"; ls "$SDK/build-tools" 2>/dev/null || true
+          yes | "$SDKM" --sdk_root="$SDK" --licenses > "$RUNNER_TEMP/licenses.log" 2>&1 || true
+          tail -n 3 "$RUNNER_TEMP/licenses.log"
+          yes | "$SDKM" --sdk_root="$SDK" "platforms;android-36" "build-tools;35.0.0" > "$RUNNER_TEMP/sdk-install.log" 2>&1 || true
+          tail -n 8 "$RUNNER_TEMP/sdk-install.log"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
 
       - name: Build installable APK
+        id: build
         run: gradle -p android --no-daemon assembleDebug
 
       # Uploaded before the checks below, so a failing test or lint rule can never block you from getting the app.
@@ -47,9 +65,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Run only when the build itself ran, so they always use the Gradle 8.13 set up above.
       - name: Unit tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: gradle -p android --no-daemon testDebugUnitTest
       - name: Lint
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: gradle -p android --no-daemon lintDebug
